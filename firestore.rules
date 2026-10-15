@@ -1,0 +1,158 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Authentication helper
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Owner helper
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Server-side campus eligibility enforcement:
+    // Requires email to be verified and strictly match the confirmed student domain.
+    function isVerifiedStudent() {
+      return isAuthenticated()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email.matches('.*@tut4life[.]ac[.]za$');
+    }
+
+    // =========================================================================
+    // Minimal User Profiles: users/{userId} (Preserved)
+    // =========================================================================
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+
+      allow create: if isOwner(userId)
+                    && request.resource.data.keys().hasOnly(['displayName', 'createdAt'])
+                    && request.resource.data.displayName is string
+                    && request.resource.data.displayName.size() > 0
+                    && request.resource.data.displayName.size() <= 80;
+
+      allow update: if isOwner(userId)
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName'])
+                    && request.resource.data.displayName is string
+                    && request.resource.data.displayName.size() > 0
+                    && request.resource.data.displayName.size() <= 80;
+
+      allow delete: if false;
+    }
+
+    // =========================================================================
+    // Item Reports: items/{itemId}
+    // =========================================================================
+    match /items/{itemId} {
+      // Eligible users can read visible item reports; authors can read their own reports even if hidden
+      allow read: if isVerifiedStudent() && (
+        resource.data.visibility == 'visible' ||
+        resource.data.ownerUid == request.auth.uid
+      );
+
+      // Report creation:
+      // - Must be a verified student
+      // - ownerUid must match request.auth.uid
+      // - Initial status must be 'Open'
+      // - Initial visibility must be 'visible'
+      // - Initial claims must be 0
+      // - Field types, permitted values and lengths validated
+      allow create: if isVerifiedStudent()
+                    && request.resource.data.ownerUid == request.auth.uid
+                    && request.resource.data.status == 'Open'
+                    && request.resource.data.visibility == 'visible'
+                    && request.resource.data.claims == 0
+                    && request.resource.data.type in ['Lost', 'Found']
+                    && request.resource.data.category in ['Electronics', 'Cards', 'Keys', 'Bags', 'Clothing', 'Other']
+                    && request.resource.data.title is string
+                    && request.resource.data.title.size() >= 2
+                    && request.resource.data.title.size() <= 100
+                    && request.resource.data.location is string
+                    && request.resource.data.location.size() >= 2
+                    && request.resource.data.location.size() <= 120
+                    && request.resource.data.description is string
+                    && request.resource.data.description.size() >= 5
+                    && request.resource.data.description.size() <= 1000
+                    && request.resource.data.eventDate is string
+                    && request.resource.data.rawEventDate is string
+                    && request.resource.data.reportedDate is string
+                    && request.resource.data.ownerName is string
+                    && request.resource.data.icon is string
+                    && (!('imageUrl' in request.resource.data) || (
+                        request.resource.data.imageUrl is string &&
+                        !request.resource.data.imageUrl.matches('^data:.*') &&
+                        request.resource.data.imageUrl.size() <= 1000
+                    ))
+                    && (!('imagePublicId' in request.resource.data) || (
+                        request.resource.data.imagePublicId is string &&
+                        request.resource.data.imagePublicId.size() <= 255
+                    ))
+                    && request.resource.data.keys().hasOnly([
+                        'title', 'type', 'category', 'location', 'eventDate',
+                        'rawEventDate', 'reportedDate', 'description', 'status',
+                        'visibility', 'ownerUid', 'ownerName', 'icon', 'claims',
+                        'createdAt', 'updatedAt', 'imageUrl', 'imagePublicId'
+                    ]);
+
+      // Report updates:
+      // - Must be author
+      // - Must be verified student
+      // - Report must currently be in 'Open' recovery status
+      // - Prevents changing ownerUid, type, visibility, claims, createdAt
+      // - Prevents direct transition to 'Reserved' or 'Returned'
+      // - Allows only safe descriptive updates and optional closure by author
+      allow update: if isVerifiedStudent()
+                    && isOwner(resource.data.ownerUid)
+                    && resource.data.status == 'Open'
+                    && request.resource.data.ownerUid == resource.data.ownerUid
+                    && request.resource.data.type == resource.data.type
+                    && request.resource.data.visibility == resource.data.visibility
+                    && request.resource.data.claims == resource.data.claims
+                    && request.resource.data.createdAt == resource.data.createdAt
+                    && request.resource.data.status in ['Open', 'Closed']
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                        'title', 'category', 'location', 'description',
+                        'eventDate', 'rawEventDate', 'icon', 'imageUrl',
+                        'imagePublicId', 'updatedAt', 'status'
+                    ])
+                    && request.resource.data.title is string
+                    && request.resource.data.title.size() >= 2
+                    && request.resource.data.title.size() <= 100
+                    && request.resource.data.location is string
+                    && request.resource.data.location.size() >= 2
+                    && request.resource.data.location.size() <= 120
+                    && request.resource.data.description is string
+                    && request.resource.data.description.size() >= 5
+                    && request.resource.data.description.size() <= 1000
+                    && request.resource.data.category in ['Electronics', 'Cards', 'Keys', 'Bags', 'Clothing', 'Other']
+                    && (!('imageUrl' in request.resource.data) || (
+                        request.resource.data.imageUrl is string &&
+                        !request.resource.data.imageUrl.matches('^data:.*') &&
+                        request.resource.data.imageUrl.size() <= 1000
+                    ))
+                    && (!('imagePublicId' in request.resource.data) || (
+                        request.resource.data.imagePublicId is string &&
+                        request.resource.data.imagePublicId.size() <= 255
+                    ));
+
+      allow delete: if false;
+    }
+
+    // =========================================================================
+    // Claims & Moderation: Strictly denied until their backend stages
+    // =========================================================================
+    match /claims/{claimId} {
+      allow read, write: if false;
+    }
+
+    match /flaggedListings/{flagId} {
+      allow read, write: if false;
+    }
+
+    // Default deny-all catch-all rule
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
